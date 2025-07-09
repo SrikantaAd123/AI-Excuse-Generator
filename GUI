@@ -1,0 +1,65 @@
+# IEG GUI using Gradio (Colab Compatible)
+import gradio as gr
+from transformers import pipeline
+from faker import Faker
+from googletrans import Translator
+from langdetect import detect
+
+excuse_model = pipeline("text2text-generation", model="google/flan-t5-base")
+fake = Faker()
+translator = Translator()
+excuse_history = []
+
+def generate_excuse(prompt):
+    return excuse_model(prompt, max_length=80, do_sample=True)[0]['generated_text']
+
+def translate_excuse(text, lang='fr'):
+    return translator.translate(text, dest=lang).text
+
+def generate_apology(context):
+    return generate_excuse(f"Guilt-tripping apology for: {context}")
+
+def generate_emergency_excuse():
+    emergencies = [
+        "Family medical emergency",
+        "Fire evacuation",
+        "Sudden illness",
+        "Power outage"
+    ]
+    return fake.random_element(elements=emergencies)
+
+def detect_language(text):
+    return detect(text)
+
+def excuse_gui(context, scenario, urgency, mood, tone, lang):
+    prompt = f"{urgency} urgency, {mood} mood, {tone} tone excuse for {scenario}: {context}"
+    excuse = generate_excuse(prompt)
+    apology = generate_apology(context)
+    emergency = generate_emergency_excuse()
+    translated = translate_excuse(excuse, lang)
+    lang_detected = detect_language(excuse)
+    excuse_history.append(excuse)
+    return excuse, translated, apology, emergency, lang_detected
+
+demo = gr.Interface(
+    fn=excuse_gui,
+    inputs=[
+        gr.Textbox(label="Context", placeholder="e.g., Missed deadline"),
+        gr.Textbox(label="Scenario", placeholder="e.g., Work, School"),
+        gr.Dropdown(["Low", "Medium", "High"], label="Urgency"),
+        gr.Dropdown(["Neutral", "Sad", "Angry", "Apologetic"], label="Mood"),
+        gr.Dropdown(["Formal", "Casual"], label="Tone"),
+        gr.Textbox(label="Target Language Code (e.g., 'fr', 'hi')", value='en')
+    ],
+    outputs=[
+        gr.Textbox(label="Generated Excuse"),
+        gr.Textbox(label="Translated Excuse"),
+        gr.Textbox(label="Apology"),
+        gr.Textbox(label="Emergency Excuse"),
+        gr.Textbox(label="Detected Language")
+    ],
+    title="🧠 Intelligent Excuse Generator (IEG)",
+    description="Generate AI-powered excuses with tone, urgency, language, and proof."
+)
+
+demo.launch()
