@@ -58,7 +58,7 @@ demo = gr.Interface(
         gr.Textbox(label="Emergency Excuse"),
         gr.Textbox(label="Detected Language")
     ],
-    title="🧠 Intelligent Excuse Generator (IEG)",
+    title="Intelligent Excuse Generator (IEG)",
     description="Generate AI-powered excuses with tone, urgency, language, and proof."
 )
 
