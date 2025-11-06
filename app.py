@@ -3,7 +3,7 @@ from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
 import datetime
 
-st.title("🧠 Intelligent Excuse Generator")
+st.title(" Intelligent Excuse Generator")
 
 context = st.text_input("Context (why you missed it)")
 scenario = st.text_input("Scenario (e.g., class, test)")
