@@ -242,11 +242,7 @@ def make_certificate_image(excuse_text: str, title: str = 'Certified Excuse') ->
     bio.seek(0)
     return bio.read()
 
-
-
-
-
-def make_certificate_pdf(excuse_text: str) -> bytes:
+  def make_certificate_pdf(excuse_text: str) -> bytes:
 """Return PDF bytes with the excuse text. Uses reportlab."""
 buffer = io.BytesIO()
 c = pdf_canvas.Canvas(buffer, pagesize=letter)
@@ -265,6 +261,10 @@ c.showPage()
 c.save()
 buffer.seek(0)
 return buffer.read()
+
+
+
+
 
 # ---------- Streamlit UI ----------
 
