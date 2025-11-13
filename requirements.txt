@@ -1,3 +1,7 @@
 streamlit
-gtts
+gTTS
 Pillow
+reportlab
+textblob
+transformers
+torch 
