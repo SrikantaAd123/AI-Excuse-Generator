@@ -5,7 +5,7 @@ File: intelligent_excuse_generator_app.py
 Features implemented:
 - Modular, testable functions for analyzing context and generating excuse templates
 - Keyword extraction and simple intent detection
-- Sentiment analysis (optionally uses Hugging Face transformers if installed; falls back to TextBlob)
+- Sentiment analysis (optionally uses Hugging Face transformers; falls back to TextBlob)
 - Multiple output formats: on-screen text, downloadable MP3 (gTTS), certificate PNG, and certificate PDF
 - Explanation panel showing why the excuse was generated (keywords, chosen mood, template score)
 - Logging and reproducible random seed for deterministic behavior when needed
@@ -241,6 +241,30 @@ def make_certificate_image(excuse_text: str, title: str = 'Certified Excuse') ->
     img.save(bio, format="PNG")
     bio.seek(0)
     return bio.read()
+
+
+
+
+
+def make_certificate_pdf(excuse_text: str) -> bytes:
+"""Return PDF bytes with the excuse text. Uses reportlab."""
+buffer = io.BytesIO()
+c = pdf_canvas.Canvas(buffer, pagesize=letter)
+width, height = letter
+c.setFont('Helvetica-Bold', 20)
+c.drawString(72, height - 72, 'Certified Excuse')
+c.setFont('Helvetica', 12)
+# simple text wrapping
+textobject = c.beginText(72, height - 120)
+for line in re.findall('.{1,80}(?:\s|$)', excuse_text):
+textobject.textLine(line.strip())
+c.drawText(textobject)
+c.setFont('Helvetica-Oblique', 10)
+c.drawString(72, 72, f"Generated on {datetime.date.today().isoformat()}")
+c.showPage()
+c.save()
+buffer.seek(0)
+return buffer.read()
 
 # ---------- Streamlit UI ----------
 
