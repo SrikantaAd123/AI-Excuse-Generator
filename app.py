@@ -187,64 +187,60 @@ def generate_excuse(context: str, scenario: str, urgency: str, mood: str, varian
         }
     }
 
-
 def make_certificate_image(excuse_text: str, title: str = 'Certified Excuse') -> bytes:
-    """Return PNG bytes of a simple certificate with the excuse text."""
     width, height = 1200, 600
     img = Image.new('RGB', (width, height), color='white')
     draw = ImageDraw.Draw(img)
+
     try:
         font_title = ImageFont.truetype("arial.ttf", 48)
         font_body = ImageFont.truetype("arial.ttf", 24)
-    except Exception:
+    except:
         font_title = ImageFont.load_default()
         font_body = ImageFont.load_default()
+
+    # title
     draw.text((60, 40), title, font=font_title, fill='black')
-    # wrap text
+
+    # ---- FIX: wrap text using textbbox instead of textsize ----
     max_width = width - 120
     words = excuse_text.split()
     lines = []
-    cur = ''
+    cur = ""
+
     for w in words:
-        if draw.textsize(cur + ' ' + w, font=font_body)[0] < max_width:
-            cur = (cur + ' ' + w).strip()
+        test_line = (cur + " " + w).strip()
+        bbox = draw.textbbox((0, 0), test_line, font=font_body)
+        text_width = bbox[2] - bbox[0]
+
+        if text_width <= max_width:
+            cur = test_line
         else:
             lines.append(cur)
             cur = w
+
     if cur:
         lines.append(cur)
+
+    # draw lines
     y = 140
     for line in lines:
         draw.text((60, y), line, font=font_body, fill='darkred')
         y += 36
-    # signature
-    draw.text((width - 360, height - 100), f"Generated on {datetime.date.today().isoformat()}", font=font_body, fill='black')
+
+    # signature/footer
+    draw.text(
+        (width - 360, height - 100),
+        f"Generated on {datetime.date.today().isoformat()}",
+        font=font_body,
+        fill='black'
+    )
+
+    # return bytes
     bio = io.BytesIO()
-    img.save(bio, format='PNG')
+    img.save(bio, format="PNG")
     bio.seek(0)
     return bio.read()
-
-
-def make_certificate_pdf(excuse_text: str) -> bytes:
-    """Return PDF bytes with the excuse text. Uses reportlab."""
-    buffer = io.BytesIO()
-    c = pdf_canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
-    c.setFont('Helvetica-Bold', 20)
-    c.drawString(72, height - 72, 'Certified Excuse')
-    c.setFont('Helvetica', 12)
-    # simple text wrapping
-    textobject = c.beginText(72, height - 120)
-    for line in re.findall('.{1,80}(?:\s|$)', excuse_text):
-        textobject.textLine(line.strip())
-    c.drawText(textobject)
-    c.setFont('Helvetica-Oblique', 10)
-    c.drawString(72, 72, f"Generated on {datetime.date.today().isoformat()}")
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer.read()
-
 
 # ---------- Streamlit UI ----------
 
