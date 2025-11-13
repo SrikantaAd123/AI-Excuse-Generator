@@ -1,65 +1,368 @@
-# IEG GUI using Gradio (Colab Compatible)
+# IEG Gradio App (Colab compatible)
+# Save as ieg_gradio.py or paste into a Colab cell and run.
+# pip installs you may need (run once in Colab):
+# !pip install gradio transformers sentencepiece gTTS pillow reportlab langdetect googletrans==4.0.0-rc1 faker
+
+import io
+import re
+import random
+import datetime
+import logging
+
 import gradio as gr
-from transformers import pipeline
 from faker import Faker
-from googletrans import Translator
-from langdetect import detect
+from gtts import gTTS
+from PIL import Image, ImageDraw, ImageFont
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas as pdf_canvas
 
-excuse_model = pipeline("text2text-generation", model="google/flan-t5-base")
+# optional: translation + lang detect
+try:
+    from googletrans import Translator
+except Exception:
+    Translator = None
+
+try:
+    from langdetect import detect
+except Exception:
+    detect = None
+
+# optional: transformers for text2text & sentiment
+try:
+    from transformers import pipeline
+    HF_AVAILABLE = True
+except Exception:
+    HF_AVAILABLE = False
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ieg_gradio")
+
 fake = Faker()
-translator = Translator()
-excuse_history = []
+translator = Translator() if Translator else None
+RANDOM_SEED = 42
+random.seed(RANDOM_SEED)
 
-def generate_excuse(prompt):
-    return excuse_model(prompt, max_length=80, do_sample=True)[0]['generated_text']
+# ----- Utilities -----
+def clean_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
 
-def translate_excuse(text, lang='fr'):
-    return translator.translate(text, dest=lang).text
+def extract_keywords(text: str, top_n: int = 6) -> list:
+    txt = re.sub(r"[^a-zA-Z0-9 ]", " ", (text or "").lower())
+    tokens = [t for t in txt.split() if len(t) > 2]
+    stopwords = set([
+        'the','and','for','you','was','had','that','this','with','but','not','from','are','they','their','your','because'
+    ])
+    tokens = [t for t in tokens if t not in stopwords]
+    freq = {}
+    for t in tokens:
+        freq[t] = freq.get(t, 0) + 1
+    sorted_tokens = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+    return [t for t,_ in sorted_tokens[:top_n]]
 
-def generate_apology(context):
-    return generate_excuse(f"Guilt-tripping apology for: {context}")
+def analyze_sentiment(text: str) -> dict:
+    txt = clean_text(text)
+    if HF_AVAILABLE:
+        try:
+            nlp = pipeline("sentiment-analysis")
+            out = nlp(txt[:512])[0]
+            return {"label": out.get("label","NEUTRAL"), "score": float(out.get("score",0.0))}
+        except Exception as e:
+            logger.warning("HF sentiment failed: %s", e)
+    # naive fallback
+    positive = ['good','better','ok','fine','improved','fortunate','happy']
+    negative = ['bad','ill','sick','urgent','emergency','broken','angry','sad','missed','late']
+    score = 0
+    for w in positive:
+        if w in txt: score += 1
+    for w in negative:
+        if w in txt: score -= 1
+    label = 'POSITIVE' if score > 0 else 'NEGATIVE' if score < 0 else 'NEUTRAL'
+    return {"label": label, "score": abs(float(score))}
+
+def choose_mood_from_context(context: str) -> str:
+    s = analyze_sentiment(context)
+    k = extract_keywords(context, 8)
+    low_ctx = context.lower()
+    if any(x in low_ctx for x in ['emergency','hospital','urgent','accident']):
+        return 'Apologetic'
+    if s['label'] == 'NEGATIVE':
+        return 'Sad'
+    if any(token in ['angry','frustrated','mad'] for token in k):
+        return 'Angry'
+    return 'Neutral'
+
+# TEMPLATES: used when HF text2text model isn't available or for hybrid generation
+TEMPLATES = [
+    "I apologize for missing the {scenario}. I was dealing with {context}. I understand this caused inconvenience and I take responsibility.",
+    "Please accept my apologies — I could not attend {scenario} because of {context}. It was unexpected and I did my best to handle it.",
+    "I'm sorry I missed {scenario}. Due to {context}, I couldn't make it. I'll make sure to catch up on anything I missed.",
+    "Regrettably, I was absent from {scenario} because {context}. I hope you can understand and I'll ensure it won't happen again."
+]
+
+def score_template(template: str, context: str, desired_mood: str) -> float:
+    k = extract_keywords(context, top_n=6)
+    score = 0.0
+    for token in k:
+        if token in template.lower():
+            score += 1.0
+    sent = analyze_sentiment(context)
+    if desired_mood == 'Apologetic' and 'apolog' in template.lower():
+        score += 1.0
+    score += random.random() * 0.01
+    return score
+
+# ----- Model wrappers -----
+# Text-to-text generator (optional)
+text2text_gen = None
+if HF_AVAILABLE:
+    try:
+        text2text_gen = pipeline("text2text-generation", model="google/flan-t5-base")
+    except Exception as e:
+        logger.warning("Could not load flan-t5: %s", e)
+        text2text_gen = None
+
+def generate_with_model(prompt: str, max_length: int = 100):
+    if text2text_gen:
+        try:
+            out = text2text_gen(prompt, max_length=max_length, do_sample=True)[0]
+            return out.get('generated_text', '').strip()
+        except Exception as e:
+            logger.warning("Model generation failed: %s", e)
+    # fallback: choose template and format
+    template = random.choice(TEMPLATES)
+    return template.format(scenario=prompt.split("for")[-1].split(":")[0].strip() or "the session",
+                           context=" ".join(prompt.split(":")[-1:]).strip() or "unforeseen circumstances")
+
+def generate_apology(context: str):
+    # a short apology using model or template
+    p = f"Write a short apologetic sentence for: {context}"
+    return generate_with_model(p, max_length=60)
 
 def generate_emergency_excuse():
     emergencies = [
         "Family medical emergency",
-        "Fire evacuation",
-        "Sudden illness",
-        "Power outage"
+        "Fire evacuation at home",
+        "Sudden illness requiring rest",
+        "Power outage in the neighborhood",
+        "Accident on the commute",
+        "Car breakdown"
     ]
     return fake.random_element(elements=emergencies)
 
-def detect_language(text):
-    return detect(text)
+# ----- Output artifacts -----
+def make_audio_bytes(text: str) -> io.BytesIO:
+    buf = io.BytesIO()
+    try:
+        tts = gTTS(text)
+        tts.write_to_fp(buf)
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        logger.warning("gTTS failed: %s", e)
+        # return empty buffer
+        return io.BytesIO()
 
-def excuse_gui(context, scenario, urgency, mood, tone, lang):
-    prompt = f"{urgency} urgency, {mood} mood, {tone} tone excuse for {scenario}: {context}"
-    excuse = generate_excuse(prompt)
+def make_certificate_png_bytes(excuse_text: str, title: str = "Certified Excuse") -> bytes:
+    width, height = 1200, 600
+    img = Image.new('RGB', (width, height), color='white')
+    draw = ImageDraw.Draw(img)
+    try:
+        font_title = ImageFont.truetype("arial.ttf", 48)
+        font_body = ImageFont.truetype("arial.ttf", 22)
+    except Exception:
+        font_title = ImageFont.load_default()
+        font_body = ImageFont.load_default()
+    draw.text((60, 40), title, font=font_title, fill='black')
+    # wrap text
+    max_width = width - 120
+    words = excuse_text.split()
+    lines = []
+    cur = ''
+    for w in words:
+        if draw.textsize((cur + ' ' + w).strip(), font=font_body)[0] < max_width:
+            cur = (cur + ' ' + w).strip()
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    y = 140
+    for line in lines:
+        draw.text((60, y), line, font=font_body, fill='darkred')
+        y += 34
+    draw.text((width - 360, height - 100), f"Generated on {datetime.date.today().isoformat()}", font=font_body, fill='black')
+    bio = io.BytesIO()
+    img.save(bio, format='PNG')
+    bio.seek(0)
+    return bio.read()
+
+def make_certificate_pdf_bytes(excuse_text: str) -> bytes:
+    buffer = io.BytesIO()
+    c = pdf_canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+    c.setFont('Helvetica-Bold', 20)
+    c.drawString(72, height - 72, 'Certified Excuse')
+    c.setFont('Helvetica', 12)
+    textobject = c.beginText(72, height - 120)
+    # wrap approx 80 chars
+    for line in re.findall('.{1,80}(?:\\s|$)', excuse_text):
+        textobject.textLine(line.strip())
+    c.drawText(textobject)
+    c.setFont('Helvetica-Oblique', 10)
+    c.drawString(72, 72, f"Generated on {datetime.date.today().isoformat()}")
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer.read()
+
+# ----- History store (in-memory) -----
+EXCUSE_HISTORY = []
+
+# ----- Main generation function (used by Gradio) -----
+def excuse_pipeline(context, scenario, urgency, mood, tone, lang_code, variants=3, use_model=True):
+    context = clean_text(context)
+    scenario = clean_text(scenario) or "the session"
+    urgency = urgency or "Medium"
+    mood = mood or "Auto"
+    tone = tone or "Formal"
+    lang_code = lang_code or "en"
+
+    # detect mood if Auto
+    if mood == "Auto":
+        mood = choose_mood_from_context(context)
+
+    # Build prompt for model (if used)
+    base_prompt = f"{urgency} urgency, {mood} mood, {tone} tone excuse for {scenario}: {context}"
+
+    # Generate multiple variants
+    variants_list = []
+    for t in TEMPLATES:
+        txt = t.format(scenario=scenario, context=context or "unforeseen circumstances")
+        variants_list.append({"text": txt, "score": score_template(t, context, mood)})
+    # combine with model-generated variants if available
+    if use_model:
+        for i in range(max(0, variants - len(variants_list))):
+            gm = generate_with_model(base_prompt, max_length=120)
+            # small post-processing
+            if urgency.lower() == 'high' and 'urgent' not in gm.lower():
+                gm = gm + f" (This was a {urgency.lower()} matter.)"
+            variants_list.append({"text": gm, "score": random.random()})
+
+    # sort
+    variants_sorted = sorted(variants_list, key=lambda x: x['score'], reverse=True)[:variants]
+
+    chosen = variants_sorted[0]['text']
+
     apology = generate_apology(context)
     emergency = generate_emergency_excuse()
-    translated = translate_excuse(excuse, lang)
-    lang_detected = detect_language(excuse)
-    excuse_history.append(excuse)
-    return excuse, translated, apology, emergency, lang_detected
 
-demo = gr.Interface(
-    fn=excuse_gui,
-    inputs=[
-        gr.Textbox(label="Context", placeholder="e.g., Missed deadline"),
-        gr.Textbox(label="Scenario", placeholder="e.g., Work, School"),
-        gr.Dropdown(["Low", "Medium", "High"], label="Urgency"),
-        gr.Dropdown(["Neutral", "Sad", "Angry", "Apologetic"], label="Mood"),
-        gr.Dropdown(["Formal", "Casual"], label="Tone"),
-        gr.Textbox(label="Target Language Code (e.g., 'fr', 'hi')", value='en')
-    ],
-    outputs=[
-        gr.Textbox(label="Generated Excuse"),
-        gr.Textbox(label="Translated Excuse"),
-        gr.Textbox(label="Apology"),
-        gr.Textbox(label="Emergency Excuse"),
-        gr.Textbox(label="Detected Language")
-    ],
-    title="Intelligent Excuse Generator (IEG)",
-    description="Generate AI-powered excuses with tone, urgency, language, and proof."
-)
+    # translation (best-effort)
+    translated = None
+    try:
+        if translator and lang_code and lang_code != 'en':
+            translated = translator.translate(chosen, dest=lang_code).text
+        else:
+            translated = chosen if lang_code == 'en' or not translator else translator.translate(chosen, dest=lang_code).text
+    except Exception as e:
+        logger.warning("Translation failed: %s", e)
+        translated = chosen
 
-demo.launch()
+    # language detection
+    lang_detected = None
+    try:
+        if detect:
+            lang_detected = detect(chosen)
+    except Exception:
+        lang_detected = "unknown"
+
+    # audio + artifacts
+    audio_buf = make_audio_bytes(chosen)
+    png_bytes = make_certificate_png_bytes(chosen)
+    pdf_bytes = make_certificate_pdf_bytes(chosen)
+
+    # analysis
+    analysis = {
+        "keywords": extract_keywords(context),
+        "sentiment": analyze_sentiment(context),
+        "detected_mood": mood,
+        "variants_count": len(variants_sorted)
+    }
+
+    # store history (lightweight)
+    EXCUSE_HISTORY.append({
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "context": context,
+        "scenario": scenario,
+        "chosen": chosen,
+        "analysis": analysis
+    })
+
+    # Gradio-friendly outputs:
+    # return (chosen, translated, apology, emergency, lang_detected, audio_buf, png_bytes, pdf_bytes, analysis)
+    # Audio: Gradio accepts tuple (file-like, "audio/mp3") or bytesIO
+    return {
+        "excuse": chosen,
+        "translated": translated,
+        "apology": apology,
+        "emergency": emergency,
+        "detected_lang": lang_detected or "unknown",
+        "audio": audio_buf,
+        "certificate_png": png_bytes,
+        "certificate_pdf": pdf_bytes,
+        "analysis": analysis
+    }
+
+# ----- Gradio UI (Blocks) -----
+with gr.Blocks(title="Intelligent Excuse Generator (IEG)") as demo:
+    gr.Markdown("## Intelligent Excuse Generator (IEG) — Gradio demo\nGenerate context-aware excuses, see analysis, download audio & certificates. Colab friendly.")
+    with gr.Row():
+        with gr.Column(scale=2):
+            ctx = gr.Textbox(label="Context (reason)", placeholder="e.g., Missed deadline because my internet went down", lines=4)
+            scen = gr.Textbox(label="Scenario", placeholder="e.g., Work, Class, Interview")
+            with gr.Row():
+                urg = gr.Dropdown(choices=["Low", "Medium", "High"], label="Urgency", value="Medium")
+                mood = gr.Dropdown(choices=["Auto", "Neutral", "Sad", "Angry", "Apologetic"], label="Mood", value="Auto")
+                tone = gr.Dropdown(choices=["Formal", "Casual"], label="Tone", value="Formal")
+            lang = gr.Textbox(label="Target language code for translation (e.g., 'fr', 'hi')", value="en")
+            variants = gr.Slider(minimum=1, maximum=5, step=1, label="Number of variants to generate", value=3)
+            use_model = gr.Checkbox(label="Use text2text model (flan-t5) if available", value=True)
+            generate_btn = gr.Button("Generate Excuse", variant="primary")
+
+        with gr.Column(scale=3):
+            out_excuse = gr.Textbox(label="Generated Excuse", lines=3)
+            out_translated = gr.Textbox(label="Translated Excuse", lines=3)
+            out_apology = gr.Textbox(label="Apology (short)")
+            out_emergency = gr.Textbox(label="Emergency excuse (short)")
+            out_lang = gr.Textbox(label="Detected Language")
+            out_audio = gr.Audio(label="Audio (MP3)", interactive=False)
+            with gr.Row():
+                out_png = gr.Image(label="Certificate (PNG)")
+                out_pdf = gr.File(label="Certificate (PDF)")
+
+            out_analysis = gr.JSON(label="Analysis (keywords, sentiment, chosen mood)")
+
+    # callback wiring
+    def on_generate(context, scenario, urgency, mood, tone, lang_code, variants, use_model_flag):
+        res = excuse_pipeline(context, scenario, urgency, mood, tone, lang_code, variants=int(variants), use_model=use_model_flag)
+        # For PNG/Audio, Gradio accepts bytes, BytesIO, etc. Audio: provide file-like
+        return (
+            res["excuse"], res["translated"], res["apology"], res["emergency"], res["detected_lang"],
+            (res["audio"], "audio/mp3"), res["certificate_png"], io.BytesIO(res["certificate_pdf"]), res["analysis"]
+        )
+
+    generate_btn.click(
+        fn=on_generate,
+        inputs=[ctx, scen, urg, mood, tone, lang, variants, use_model],
+        outputs=[out_excuse, out_translated, out_apology, out_emergency, out_lang, out_audio, out_png, out_pdf, out_analysis]
+    )
+
+    gr.Markdown("**History:** last 10 generated items (in-memory).")
+    def get_history():
+        return EXCUSE_HISTORY[-10:][::-1]
+    hist = gr.Dataframe(value=[], label="Generation history (timestamp | scenario | chosen)")
+    refresh = gr.Button("Refresh history")
+    refresh.click(lambda: [{"timestamp": h["timestamp"], "scenario": h["scenario"], "chosen": h["chosen"]} for h in get_history()], None, hist)
+
+# Launch (in Colab use share=True if required)
+if __name__ == "__main__":
+    demo.launch(share=False)
